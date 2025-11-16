@@ -200,7 +200,7 @@ Return:
           dependencies: validDependencies,
         };
       })
-      .filter((task): task is Task => {
+      .filter((task: any): task is Task => {
         // Final validation
         if (!task.id || !task.description || !task.tool) {
           console.error(`❌ Task missing required fields: ${JSON.stringify(task)}`);
