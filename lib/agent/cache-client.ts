@@ -69,7 +69,7 @@ class UpstashRedisAgentCache implements AgentCache {
 
 	async get(key: string): Promise<TaskResult | null> {
 		try {
-			const data = await this.client.get<CacheValue>(key);
+			const data = (await this.client.get(key)) as CacheValue | null;
 			if (!data) return null;
 			return {
 				taskId: key,
@@ -127,7 +127,7 @@ export function getAgentCache(): AgentCache {
 				const c = await (this as any)._ensure();
 				if (!c) return (cacheInstance as AgentCache).get(key);
 				try {
-					const data = await c.get<CacheValue>(key);
+					const data = (await c.get(key)) as CacheValue | null;
 					if (!data) return null;
 					return {
 						taskId: key,
