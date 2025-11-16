@@ -51,7 +51,7 @@ class InMemoryAgentCache implements AgentCache {
 			if (v && Date.now() - v.timestamp > ttlMs) {
 				this.store.delete(key);
 			}
-		}, ttlMs + 1000).unref?.();
+		}, ttlMs + 1000);
 	}
 
 	generateKey(parts: Record<string, any>): string {

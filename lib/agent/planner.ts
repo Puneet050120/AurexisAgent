@@ -102,7 +102,7 @@ Return:
 
       // Additional validation and sanitization
       let tasks: Task[] = object.tasks
-      .map((task, index) => {
+      .map((task: any, index: number) => {
         // Ensure task ID follows correct format
         let taskId = task.id.trim();
         if (!/^task-\d+$/.test(taskId)) {
