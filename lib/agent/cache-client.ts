@@ -107,24 +107,21 @@ export function getAgentCache(): AgentCache {
 	const upstashToken = process.env.UPSTASH_REDIS_REST_TOKEN;
 	if (upstashUrl && upstashToken) {
 		// Lazy dynamic import guarded by env presence; tolerate missing dependency locally
+		let client: any = null;
+		const ensure = async (): Promise<any | null> => {
+			if (client) return client;
+			try {
+				const mod = await import('@upstash/redis');
+				client = new mod.Redis({ url: upstashUrl, token: upstashToken });
+				return client;
+			} catch {
+				cacheInstance = new InMemoryAgentCache();
+				return null;
+			}
+		};
 		return (cacheInstance = {
-			// Small proxy that initializes real client on first set/get
-			// to avoid failing build when module is absent
-			_client: null as any,
-			async _ensure() {
-				if (this._client) return this._client;
-				try {
-					const mod = await import('@upstash/redis');
-					this._client = new mod.Redis({ url: upstashUrl, token: upstashToken });
-					return this._client;
-				} catch {
-					// Fallback to memory cache if import fails
-					cacheInstance = new InMemoryAgentCache();
-					return null;
-				}
-			},
-			async get(key: string) {
-				const c = await (this as any)._ensure();
+			async get(key: string): Promise<TaskResult | null> {
+				const c = await ensure();
 				if (!c) return (cacheInstance as AgentCache).get(key);
 				try {
 					const data = (await c.get(key)) as CacheValue | null;
@@ -140,8 +137,8 @@ export function getAgentCache(): AgentCache {
 					return null;
 				}
 			},
-			async set(key: string, result: any, ttlMs = DEFAULT_TTL_MS) {
-				const c = await (this as any)._ensure();
+			async set(key: string, result: any, ttlMs = DEFAULT_TTL_MS): Promise<void> {
+				const c = await ensure();
 				if (!c) return (cacheInstance as AgentCache).set(key, result, ttlMs);
 				try {
 					const value: CacheValue = { result, timestamp: Date.now() };
@@ -151,11 +148,11 @@ export function getAgentCache(): AgentCache {
 					// no-op
 				}
 			},
-			generateKey(parts: Record<string, any>) {
+			generateKey(parts: Record<string, any>): string {
 				const normalized = JSON.stringify(parts, Object.keys(parts).sort());
 				return fnv1aHash(normalized);
 			},
-		} as unknown as AgentCache);
+		});
 	}
 	cacheInstance = new InMemoryAgentCache();
 	return cacheInstance;
