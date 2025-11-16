@@ -302,6 +302,8 @@ export function generateFinalSummary(
     calculatorTasks.forEach((task, idx) => {
       const result = task.result?.result;
       const desc = task.description?.toLowerCase() || '';
+      const originalDesc = task.description || '';
+      const deps = task.dependencies || plan.tasks.find(t => t.id === task.taskId)?.dependencies || [];
       
       if (result !== undefined) {
         // Skip temperature conversions if they're already shown in weather section
@@ -324,6 +326,30 @@ export function generateFinalSummary(
             (result > 1 ? ((result - 1) * 100) : (result * 100)) : 
             parseFloat(String(result));
           finalAnswer += `**CAGR Result**: ${percent.toFixed(2)}%\n\n`;
+        } else if (/usd.*inr|inr.*usd|exchange rate|convert|₹|rs\.?/i.test(plan.goal)) {
+          // Currency conversion narrative
+          // Try to find the related search task that contains the rate
+          let rate: number | null = null;
+          for (const depId of deps) {
+            const depTaskRes = normalizedTaskResults.find(t => t.taskId === depId && t.tool === 'web_search');
+            const n = depTaskRes?.result ? parseFloat(String((depTaskRes.result.summary || '').match(/(\d+(\.\d+)?)/)?.[1] || '')) : NaN;
+            if (!isNaN(n) && n > 0) {
+              rate = n;
+              break;
+            }
+          }
+          const usdValue = typeof result === 'number' ? result : parseFloat(String(result));
+          if (!isNaN(usdValue)) {
+            const prettyUsd = `$${usdValue.toFixed(2)}`;
+            const prettyInr = originalDesc.match(/10,?0{3,}/) ? '₹10,000' : '₹' + Math.round(usdValue * (rate || 80)).toLocaleString();
+            if (rate) {
+              finalAnswer += `**Currency Conversion**: ${prettyInr} ≈ ${prettyUsd} at ~₹${rate.toFixed(2)} per $1.\n\n`;
+            } else {
+              finalAnswer += `**Currency Conversion**: ≈ ${prettyUsd}.\n\n`;
+            }
+          } else {
+            finalAnswer += `**Conversion Result**: ${String(result)}\n\n`;
+          }
         } else if (desc.includes('compare') || desc.includes('comparison')) {
           // Comparison result
           if (typeof result === 'number') {
@@ -399,6 +425,29 @@ export function generateFinalSummary(
         }
       }
     });
+  }
+
+  // If goal is about movies/ratings, add a recommendation based on highest rating we can infer
+  if (/movie|imdb|rating|film/i.test(goalLower)) {
+    let bestTitle: string | null = null;
+    let bestRating = -1;
+    searchTasks.forEach((task) => {
+      const items = task.result?.results || [];
+      items.forEach((it: any) => {
+        const text = `${it.title || ''} ${it.content || ''}`;
+        const match = text.match(/(\d\.\d)\s*\/\s*10/i);
+        const rating = match ? parseFloat(match[1]) : NaN;
+        if (!isNaN(rating) && rating > bestRating) {
+          bestRating = rating;
+          // Heuristic: use the first capitalized phrase from title as movie name
+          const titleName = (it.title || '').replace(/\s*-\s*.*$/, '').trim();
+          bestTitle = titleName || 'the top movie';
+        }
+      });
+    });
+    if (bestTitle && bestRating > 0) {
+      finalAnswer += `\n**Recommendation**: Watch ${bestTitle} (IMDb ${bestRating.toFixed(1)}/10) tonight.\n`;
+    }
   }
 
   // Summary text

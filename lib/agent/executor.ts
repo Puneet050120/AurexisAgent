@@ -1,7 +1,7 @@
 import { Plan, Task, TaskResult, TaskStatus } from '../types/agent';
 import { topologicalSort } from '../utils/topological-sort';
 import { toolExecutors } from './tools';
-import { taskCache } from './cache';
+import { getAgentCache, TASK_TTL_MS } from './cache-client';
 import { extractCalculatorParams, extractStockSymbol, extractNumericValue } from './parameter-extractor';
 function parseSearchResultsForEntities(searchResult: any, entityType: 'startup' | 'company' | 'funding' | 'any' = 'any'): string[] {
   const entities: string[] = [];
@@ -178,6 +178,10 @@ export async function executeTask(
                                task.description.replace(/search for:/i, '').trim();
               params.query = `${baseQuery} ${entity}`;
               console.log(`[EXECUTOR] 🌐 Extracted entity "${entity}" from ${depId} for funding query: "${params.query}"`);
+            } else if ((descLower.includes('imdb') || descLower.includes('rating')) && entities.length > 0) {
+              const entity = entities[0];
+              params.query = `IMDb rating ${entity}`;
+              console.log(`[EXECUTOR] 🎬 Built IMDb rating query from dependency entity "${entity}"`);
             } else if (entities.length > 0 && descLower.includes('for')) {
               const entity = entities[0];
               const baseQuery = task.description.match(/search for:\s*(.+)/i)?.[1] || 
@@ -187,8 +191,17 @@ export async function executeTask(
             }
             
             if (!params.query && depData?.summary) {
-              params.query = depData.summary.substring(0, 100);
-              console.log(`[EXECUTOR] 🌐 Fallback: using summary from ${depId}`);
+              const num = extractNumericValue(depData) ?? null;
+              const base = task.description
+                .replace(/^search\s+for\s*/i, '')
+                .replace(/^[^:]+:\s*/i, '')
+                .trim();
+              if (/favorable|suggest|good time|should i/i.test(base) && num !== null) {
+                params.query = `Is it a good time to convert INR to USD at ~${num} INR per USD?`;
+              } else {
+                params.query = base || (depData.summary as string).slice(0, 120);
+              }
+              console.log(`[EXECUTOR] 🌐 Built follow-up query from dependency summary: "${params.query}"`);
             }
           }
         } else if (task.tool === 'calculator' && !params.expression) {
@@ -215,6 +228,25 @@ export async function executeTask(
             if (expression) {
               params.expression = expression;
               console.log(`[EXECUTOR] 🧮 Generated expression: "${params.expression}"`);
+            } else {
+              // Try to extract IMDb ratings from dependency web_search results and build Math.max
+              for (const [depId, depResult] of dependencies.entries()) {
+                if (depResult.status === 'completed' && depResult.result && depResult.result.results) {
+                  const items: any[] = depResult.result.results;
+                  const ratings: number[] = [];
+                  items.forEach((it: any) => {
+                    const text = `${it.title || ''} ${it.content || ''}`;
+                    const m = text.match(/(\d\.\d)\s*\/\s*10|\bIMDB[:\s-]*([0-9]\.[0-9])\b/i);
+                    const val = m ? parseFloat(m[1] || m[2]) : NaN;
+                    if (!isNaN(val)) ratings.push(val);
+                  });
+                  if (ratings.length > 0) {
+                    params.expression = `Math.max(${ratings.join(', ')})`;
+                    console.log(`[EXECUTOR] 🎬 Extracted IMDb ratings and built expression: "${params.expression}"`);
+                    break;
+                  }
+                }
+              }
             }
           }
         } else if (task.tool === 'api' && !params.endpoint) {
@@ -239,8 +271,15 @@ export async function executeTask(
     
     if (task.tool === 'web_search' && !params.query) {
       const processedDescription = replacePlaceholders(task.description, dependencies, taskMap);
-      const queryMatch = processedDescription.match(/search for:\s*(.+)/i) || processedDescription.match(/^(.+)$/);
-      params.query = queryMatch ? queryMatch[1].trim() : processedDescription.trim();
+      let q = processedDescription;
+      const colonMatch = processedDescription.match(/search for:\s*(.+)/i);
+      if (colonMatch) {
+        q = colonMatch[1];
+      } else {
+        q = processedDescription.replace(/^search\s+for\s+/i, '');
+      }
+      q = q.replace(/^['"]+|['"]+$/g, '').trim();
+      params.query = q.length > 0 ? q : processedDescription.trim();
       
       // Replace placeholders from dependencies
       if (params.query.includes('[') && params.query.includes(']')) {
@@ -428,17 +467,38 @@ export async function executeTask(
 
     console.log(`[EXECUTOR] ⚙️  Executing ${task.tool} with params:`, JSON.stringify(params, null, 2));
 
-    const cachedResult = taskCache.get(task.id, task.tool, params);
-    if (cachedResult) {
+    // Agent-standard cache: check as early as possible using stable key parts
+    const cache = getAgentCache();
+    const keyParts: Record<string, any> = { 
+      tool: task.tool, 
+      description: task.description.trim()
+    };
+    // Only include the minimal stable param(s) that determine uniqueness
+    if (task.tool === 'web_search' && params.query) keyParts.query = params.query;
+    if (task.tool === 'api' && params.endpoint) {
+      keyParts.endpoint = params.endpoint;
+      if (params.params?.city) keyParts.city = params.params.city;
+    }
+    if (task.tool === 'calculator' && params.expression) keyParts.expression = params.expression;
+    if (task.tool === 'stock' && params.symbol) keyParts.symbol = String(params.symbol).toUpperCase();
+    const cacheKey = cache.generateKey(keyParts);
+    const cached = await cache.get(cacheKey);
+    if (cached?.result) {
       console.log(`[EXECUTOR] ✅ Using cached result for ${task.id}`);
-      return cachedResult;
+      return {
+        taskId: task.id,
+        status: 'completed',
+        result: cached.result,
+        startedAt: startTime,
+        completedAt: new Date(),
+      };
     }
 
     let lastError: Error | null = null;
     for (let attempt = 0; attempt < 3; attempt++) {
       try {
         const result = await toolExecutor(params);
-        taskCache.set(task.id, task.description, task.tool, params, result);
+        await cache.set(cacheKey, result, TASK_TTL_MS);
         console.log(`[EXECUTOR] ✅ Task ${task.id} completed successfully`);
         console.log(`[EXECUTOR] 📊 Result preview:`, JSON.stringify(result).substring(0, 150));
         return {

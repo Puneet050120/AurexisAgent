@@ -1,0 +1,10 @@
+{
+  "version": 2,
+  "functions": {
+    "app/api/agent/stream/route.ts": {
+      "runtime": "edge"
+    }
+  }
+}
+
+

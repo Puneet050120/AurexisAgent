@@ -62,8 +62,8 @@ Return:
 
   // Cache check will be done client-side via API
   // Server-side planning will always generate fresh plans for consistency
-  const maxRetries = 1;
-  const maxPlanningTime = 12000; // 12 seconds timeout
+  const maxRetries = 0;
+  const maxPlanningTime = 8000; // 8 seconds timeout
   const startTime = Date.now();
   let lastError: Error | null = null;
   
@@ -81,11 +81,15 @@ Return:
       
       let object;
       try {
-        const result = await generateObject({
-          model: openrouter('openai/gpt-oss-120b'),
+        const planPromise = generateObject({
+          model: openrouter('openai/gpt-4o-mini'),
           schema: planSchema,
           prompt: retryPrompt,
         });
+        const timeoutPromise = new Promise<never>((_, reject) => {
+          setTimeout(() => reject(new Error('planner-timeout')), Math.max(1000, maxPlanningTime - (Date.now() - startTime)));
+        });
+        const result = await Promise.race([planPromise, timeoutPromise]) as any;
         object = result.object;
       } catch (schemaError: any) {
         // If schema validation fails, check if we can still extract tasks
@@ -252,6 +256,23 @@ Return:
         });
       }
     }
+
+    // Convert inappropriate API tasks (non-weather) into web_search tasks, especially for movies/ratings
+    const isMovieQuery = /movie|imdb|rating|film/i.test(userGoal);
+    tasks = tasks.map((t, idx) => {
+      if (t.tool === 'api' && !hasWeatherQuery) {
+        const newDesc = isMovieQuery
+          ? 'Search for: IMDb ratings for top movies [Item 1]'
+          : `Search for: ${t.description.replace(/^Get\s*/i, '').trim()}`;
+        return {
+          ...t,
+          tool: 'web_search',
+          description: newDesc,
+          dependencies: t.dependencies,
+        };
+      }
+      return t;
+    });
 
     // Validate task IDs are sequential and unique
     const taskIds = new Set<string>();

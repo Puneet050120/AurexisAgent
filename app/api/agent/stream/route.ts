@@ -7,6 +7,7 @@ import { rateLimit, getClientIdentifier } from '@/lib/utils/rate-limit';
 import { TaskResult } from '@/lib/types/agent';
 
 export const maxDuration = 60;
+export const runtime = 'edge';
 
 export async function POST(req: NextRequest) {
   try {
@@ -60,6 +61,9 @@ export async function POST(req: NextRequest) {
         try {
           send('status', { stage: 'planning', message: 'Planning tasks...' });
           const plan = await generatePlan(goal);
+          if (!plan?.tasks || plan.tasks.length === 0) {
+            throw new Error('No tasks generated');
+          }
           send('plan', { plan });
 
           send('status', { stage: 'executing', message: 'Executing tasks...' });
